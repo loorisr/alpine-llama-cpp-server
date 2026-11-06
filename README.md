@@ -1,24 +1,40 @@
 <div align="center">
 
-  <img width="250px" height="auto" src="https://raw.githubusercontent.com/SamuelTallet/alpine-llama-cpp-server/refs/heads/main/assets/alpine-llama-image-size-rounded-with-bubbles-500px.png">
+  <img width="250px" height="auto" src="https://raw.githubusercontent.com/loorisr/alpine-llama-cpp-server/refs/heads/main/assets/alpine-llama-image-size-rounded-with-bubbles-500px.png">
   
-  Alpine LLaMA is an ultra-compact Docker image (less than 14 MB), providing a [LLaMA.cpp](https://github.com/ggml-org/llama.cpp) HTTP server for language model inference.
+  Alpine LLaMA is a compact Docker image (about 46 MB, web interface included), providing a [LLaMA.cpp](https://github.com/ggml-org/llama.cpp) HTTP server for language model inference.
 
 </div>
 
 <div align="center">
 
-  [![Available on Docker Hub](https://img.shields.io/badge/available_on-dockerhub-2496ed?style=flat&logo=docker&color=%232496ed)](https://hub.docker.com/r/samueltallet/alpine-llama-cpp-server)
-  [![Docker Image Size](https://img.shields.io/docker/image-size/samueltallet/alpine-llama-cpp-server?style=flat&color=%236db33f)](https://hub.docker.com/layers/samueltallet/alpine-llama-cpp-server/latest)
+  [![Available on GHCR](https://img.shields.io/badge/available_on-ghcr.io-181717?style=flat&logo=github&logoColor=white)](https://github.com/loorisr/alpine-llama-cpp-server/pkgs/container/alpine-llama-cpp-server)
 
 </div>
+
+This is a fork of [SamuelTallet/alpine-llama-cpp-server](https://github.com/SamuelTallet/alpine-llama-cpp-server).
+
+## Image tags
+
+This image is built every week from the `master` branch of LLaMA.cpp, not from a release:
+
+- `edge` is the latest build.
+- `sha-<commit>` is the build of a given LLaMA.cpp commit.
+
+## CPU requirements
+
+The image is `linux/amd64` only and targets the Intel Core Ultra 7 265K and N100 CPUs. Your CPU needs AVX2 and AVX-VNNI, otherwise the server crashes with an illegal instruction error (`SIGILL`). To check your CPU:
+
+```bash
+grep -m1 -o -w avx_vnni /proc/cpuinfo
+```
 
 
 ## Use cases
 
 This Docker image is particularly suited for:
 - Environments with limited disk space or low bandwidth.
-- Servers that cannot do GPU-accelerated inference, e.g. a CPU-only VPS or a Raspberry Pi.
+- Servers that cannot do GPU-accelerated inference, e.g. a CPU-only Intel N100 mini PC.
 
 ## Examples
 
@@ -28,13 +44,14 @@ You can start a local standalone HTTP inference server who listens at the port 5
 
 ```bash
 docker run --name alpine-llama --publish 50000:8080 \
+  --volume alpine-llama-models:/models \
   --env LLAMA_ARG_HF_REPO=unsloth/Qwen3-0.6B-GGUF \
   --env LLAMA_API_KEY=sk-xxxx \
   --env LLAMA_ARG_ALIAS=qwen3-0.6b \
-  samueltallet/alpine-llama-cpp-server
+  ghcr.io/loorisr/alpine-llama-cpp-server:edge
 ```
 
-Once the GGUF model file is downloaded from HF (and cached in the Docker container filesystem), you can query your local endpoint using the official [OpenAI TS & JS API library](https://www.npmjs.com/package/openai).
+Once the GGUF model file is downloaded from HF (and cached in the `alpine-llama-models` volume), you can use the built-in web interface at [http://localhost:50000](http://localhost:50000), or query your local endpoint using the official [OpenAI TS & JS API library](https://www.npmjs.com/package/openai).
 
 To check this model's structured output capabilities, execute the following Node.js script who extracts metadata from a product description according to a predefined JSON schema:
 
@@ -93,7 +110,7 @@ If you want a fully-featured AI chat GUI, you can use this *docker-compose.yml* 
 ```yaml
 services:
   alpine-llama:
-    image: samueltallet/alpine-llama-cpp-server
+    image: ghcr.io/loorisr/alpine-llama-cpp-server:edge
     container_name: alpine-llama
     volumes:
       - ./models/HuggingFaceTB/smollm2-1.7b-instruct-q4_k_m.gguf:/opt/smollm2-1.7b.gguf:ro
@@ -117,11 +134,11 @@ services:
 
 Prior to run `docker compose up`, you will need to:
 
-Download the [smollm2-1.7b-instruct-q4_k_m.gguf](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF/blob/main/smollm2-1.7b-instruct-q4_k_m.gguf) model file then put it in your *models/HuggingFaceTB* directory (next to the *docker-compose.yml* file).
+Download the [smollm2-1.7b-instruct-q4_k_m.gguf](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF/blob/main/smollm2-1.7b-instruct-q4_k_m.gguf) model file then put it in your *models/HuggingFaceTB* directory (next to the *docker-compose.yml* file). The server runs as the unprivileged user with UID 1000, so this file must be readable by this user.
 
 Once the two services are started, you can optionally configure an AI assistant at [http://localhost:3210](http://localhost:3210) and begin to chat with the SmolLM2-1.7B model:
 
-<img width="600px" height="auto" src="https://github.com/SamuelTallet/alpine-llama-cpp-server/blob/main/assets/alpine-llama-with-lobe-chat.png?raw=true">
+<img width="600px" height="auto" src="https://github.com/loorisr/alpine-llama-cpp-server/blob/main/assets/alpine-llama-with-lobe-chat.png?raw=true">
 
 ## Configuration
 
@@ -135,12 +152,15 @@ You can pass environment variables to the Docker container to configure the Alpi
 | `LLAMA_ARG_MODEL_URL`     | or URL to download the model file from.       | `https://your.host/Llama-3.2-1B.gguf`   |
 | `LLAMA_API_KEY`           | Key for authenticating HTTP API requests.     | `sk-n5V9UAJt6wRFfZQ4eDYk37uGzbKXdpNj`   |
 | `LLAMA_ARG_ALIAS`         | Alias of the model in HTTP API requests.      | `Llama-3.2-1B`                          |
+| `LLAMA_CACHE`             | Directory of downloaded models.               | `/models` (default in this image)       |
 
 An exhaustive list of these variables can be found in the official [LLaMA.cpp server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#usage).
 
+You can also pass the server's command-line arguments directly, e.g. `docker run ghcr.io/loorisr/alpine-llama-cpp-server:edge --help`.
+
 ## License
 
-Project licensed under MIT. See the [LICENSE](https://github.com/SamuelTallet/alpine-llama-cpp-server/blob/main/LICENSE) file for details.
+Project licensed under MIT. See the [LICENSE](LICENSE) file for details.
 
 ## Copyright
 

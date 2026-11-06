@@ -5,67 +5,63 @@ FROM alpine:3.24 AS build
 # The target platform, set by Docker Buildx.
 ARG TARGETPLATFORM
 
-# The LLaMA.cpp git tag, passed by the GitHub Action, to checkout and compile.
-ARG LLAMA_GIT_TAG
+# The LLaMA.cpp git ref to compile: a branch or a full commit SHA.
+# The GitHub Action passes the SHA of the current master, so builds are traceable.
+ARG LLAMA_GIT_REF=master
 
 # Set the working directory.
 WORKDIR /opt/llama.cpp
 
-# Copy the bigstack.c source file for building the thread stack fix.
-COPY source/bigstack.c /tmp/bigstack.c
-
 # Compile the official LLaMA.cpp HTTP Server.
 RUN \
-    # Since my GitHub Action uses QEMU for the ARM64 build, I need to disable the native build.
-    # Otherwise, the build will fail. See: https://github.com/ggml-org/llama.cpp/issues/10933
-    # The CPU architecture is set to "armv8-a" because it's the one used by the Raspberry Pi 3+.
+    # Never use GGML_NATIVE=ON: it would tie the binary to the CPU of the build machine.
+    # On ARM64, the CPU architecture is "armv8-a", the one used by the Raspberry Pi 3+.
+    # On AMD64, target the instructions shared by the Core Ultra 7 265K and the Intel N100.
+    # There is no AVX-512 on these CPUs. A CPU without AVX2 or AVX-VNNI will crash (SIGILL).
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        export GGML_NATIVE=OFF; \
-        export GGML_CPU_ARM_ARCH="armv8-a"; \
+        CPU_FLAGS="-DGGML_CPU_ARM_ARCH=armv8-a"; \
     else \
-        export GGML_NATIVE=ON; \
-        export GGML_CPU_ARM_ARCH=""; \
+        CPU_FLAGS="-DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_AVX_VNNI=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON"; \
     fi && \
     # Install build dependencies.
-    # Using --no-cache to avoid caching the Alpine packages index
-    # and --virtual to group build dependencies for easier cleanup.
-    apk add --no-cache --virtual .build-deps \
+    # Using --no-cache to avoid caching the Alpine packages index.
+    apk add --no-cache \
     git \
     g++ \
     make \
     cmake \
     linux-headers \
     openssl-dev && \
-    # Checkout the llama.cpp repository to the wanted version (git tag).
-    # A shallow clone (--depth 1) is used to minimize the data transfer.
-    git clone --depth 1 https://github.com/ggml-org/llama.cpp . && \
+    # Checkout the llama.cpp repository to the wanted ref.
+    # A shallow fetch (--depth 1) is used to minimize the data transfer.
+    git init && \
+    git remote add origin https://github.com/ggml-org/llama.cpp && \
+    git fetch --depth 1 origin "$LLAMA_GIT_REF" && \
+    git checkout FETCH_HEAD && \
     # Configure the CMake build system.
     cmake -B build \
-    # On AMD64, use the native build; but on ARM64, disable it.
-    -DGGML_NATIVE=${GGML_NATIVE} \
-    # On ARM64, set the CPU architecture to "armv8-a". See the note above.
-    -DGGML_CPU_ARM_ARCH=${GGML_CPU_ARM_ARCH} \
+    -DCMAKE_BUILD_TYPE=Release \
+    # Disable the native build, then set the CPU flags. See the note above.
+    -DGGML_NATIVE=OFF \
+    $CPU_FLAGS \
     # Build only the llama-server executable.
     -DLLAMA_BUILD_SERVER=ON \
-    # Don't build the embedded web interface to save space.
-    -DLLAMA_BUILD_WEBUI=ON \
-    # Include the GGML lib inside this executable to ease deployment...
-    -DBUILD_SHARED_LIBS=OFF && \
-    # Compile the llama-server target in Release mode for a production use.
-    cmake --build build --target llama-server --config Release -j4 && \
-    # Remove non-essential symbols from this executable to save space.
-    strip build/bin/llama-server && \
-    # Copy this executable in a safe place...
-    cp build/bin/llama-server /opt && \
-    # Build a small shared library that overrides pthread_create to use 8MB stacks.
+    # Embed the web interface: its prebuilt assets are downloaded from a Hugging Face bucket.
+    -DLLAMA_USE_PREBUILT_UI=ON \
     # musl libc hardcodes thread stacks at 128KB, which causes std::regex stack overflows
     # when cpp-httplib parses long redirect URLs (e.g. HuggingFace Xet storage).
-    gcc -shared -fPIC -o /opt/bigstack.so /tmp/bigstack.c -ldl && \
-    strip /opt/bigstack.so && \
-    # before cleaning all other build files.
-    rm -rf /opt/llama.cpp/* && \
-    # Remove build dependencies since they are useless now.
-    apk del .build-deps
+    # musl raises its default thread stack size from this value (PT_GNU_STACK).
+    -DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,stack-size=8388608 \
+    # Include the GGML lib inside this executable to ease deployment...
+    -DBUILD_SHARED_LIBS=OFF && \
+    # Compile the llama-server target.
+    cmake --build build --target llama-server -j"$(nproc)" && \
+    # A failed web interface download is only a CMake warning, so fail the build here.
+    grep -aqE 'bundle\.[A-Za-z0-9_-]+\.js' build/bin/llama-server && \
+    # Remove non-essential symbols from this executable to save space.
+    strip build/bin/llama-server && \
+    # Copy this executable in a safe place.
+    cp build/bin/llama-server /opt
 
 # Final stage.
 # Starting a new stage to create a smaller, cleaner image containing only the runtime env.
@@ -75,20 +71,35 @@ FROM alpine:3.24
 WORKDIR /opt/llama.cpp
 
 # Install runtime dependencies: C++, OpenSSL & OpenMP.
+# Then create an unprivileged user and its models directory.
 RUN apk add --no-cache \
     libstdc++ \
     libssl3 \
     libcrypto3 \
-    libgomp
+    libgomp && \
+    adduser -D -u 1000 llama && \
+    mkdir /models && \
+    chown llama:llama /models
 
-# Copy the compiled llama-server executable and the stack-size fix from the build stage.
-COPY --from=build /opt/llama-server /opt/bigstack.so ./
+# Copy the compiled llama-server executable from the build stage.
+COPY --from=build /opt/llama-server ./
 
-# Server will listen on 8080.
+# Models downloaded by the server are stored here. Mount a volume to keep them.
+ENV LLAMA_CACHE=/models
+VOLUME /models
+
+# 0.0.0.0 allows the server to be accessible from outside the container.
+ENV LLAMA_ARG_HOST=0.0.0.0
+
+# Server will listen on 8080. It must be explicit: LLaMA.cpp now defaults to 9931.
+ENV LLAMA_ARG_PORT=8080
 EXPOSE 8080
 
-# Preload the stack-size fix, then run the LLaMA.cpp HTTP Server.
-ENV LD_PRELOAD=/opt/llama.cpp/bigstack.so
+# The start period leaves time to download and load a model.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10m --retries=3 \
+    CMD wget -qO /dev/null "http://127.0.0.1:${LLAMA_ARG_PORT}/health"
 
-CMD [ "/opt/llama.cpp/llama-server", "--host", "0.0.0.0"]
-# 0.0.0.0 allows the server to be accessible from outside the container.
+USER llama
+
+# Run the LLaMA.cpp HTTP Server. Arguments of "docker run" are passed to it.
+ENTRYPOINT [ "/opt/llama.cpp/llama-server" ]

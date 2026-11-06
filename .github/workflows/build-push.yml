@@ -5,50 +5,47 @@ on:
     - cron: '0 5 * * 2'  # every Tuesday at 5 AM UTC
   workflow_dispatch: # on demand
 
+permissions:
+  contents: read
+  packages: write # to push to GitHub Container Registry (GHCR)
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout llama.cpp repository
-        uses: actions/checkout@v6
-        with:
-          repository: ggml-org/llama.cpp
-          path: llama.cpp
-          fetch-depth: 0 # fetch all history to get tags as well
-
-      - name: Get current llama.cpp tag
-        id: get_tag
-        working-directory: llama.cpp
+      - name: Get current llama.cpp master commit
+        id: get_sha
         run: |
-          tag=$(git describe --tags --abbrev=0) || exit $?
-          echo "tag=$tag" >> $GITHUB_OUTPUT
+          sha=$(git ls-remote https://github.com/ggml-org/llama.cpp HEAD | cut -f1)
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout my repository
         uses: actions/checkout@v6
 
-      - name: Set up QEMU # to support more platforms that amd64
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: arm64
-
-      - name: Set up Docker Buildx # for cross-platform builds
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push to Docker Hub
+      - name: Build and push to GitHub Container Registry
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           build-args: |
-            LLAMA_GIT_TAG=${{ steps.get_tag.outputs.tag }}
+            LLAMA_GIT_REF=${{ steps.get_sha.outputs.sha }}
           push: true
           tags: |
-            ${{ vars.DOCKERHUB_USERNAME }}/${{ vars.DOCKERHUB_REPOSITORY }}:${{ steps.get_tag.outputs.tag }}
-            ${{ vars.DOCKERHUB_USERNAME }}/${{ vars.DOCKERHUB_REPOSITORY }}:latest
+            ghcr.io/${{ github.repository }}:edge
+            ghcr.io/${{ github.repository }}:sha-${{ steps.get_sha.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.get_sha.outputs.sha }}
