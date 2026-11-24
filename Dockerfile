@@ -57,7 +57,8 @@ RUN \
     # Compile the llama-server target.
     cmake --build build --target llama-server -j"$(nproc)" && \
     # A failed web interface download is only a CMake warning, so fail the build here.
-    grep -aqE 'bundle\.[A-Za-z0-9_-]+\.js' build/bin/llama-server && \
+    # The entry script is "_app/immutable/entry/start.<hash>.js" (formerly "bundle.<hash>.js").
+    grep -aqE '(_app/immutable/entry/start|bundle)\.[A-Za-z0-9_-]+\.js' build/bin/llama-server && \
     # Remove non-essential symbols from this executable to save space.
     strip build/bin/llama-server && \
     # Copy this executable in a safe place.
